@@ -23,6 +23,8 @@ class Settings:
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "120"))
     source_dir: Path = Path(os.getenv("SOURCE_DIR", "data/source_documents"))
     vector_dir: Path = Path(os.getenv("VECTOR_DIR", "data/vector_store"))
+    reference_queries: Path = Path(os.getenv("REFERENCE_QUERIES", "data/reference_queries.txt"))
+    min_drift_window: int = int(os.getenv("MIN_DRIFT_WINDOW", "20"))
 
 
 settings = Settings()

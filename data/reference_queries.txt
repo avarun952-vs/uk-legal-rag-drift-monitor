@@ -1,0 +1,14 @@
+# Fixed reference queries. Their top-1 retrieval scores are recorded when the baseline
+# is created and compared against later to detect retrieval drift.
+What is the lawful basis for processing personal data?
+How should organisations apply data minimisation?
+What are the rights of individuals over their personal data?
+What transparency information must be given about automated decision making?
+How long may personal data be stored under storage limitation?
+What security measures are expected to protect personal data?
+What record keeping and accountability controls should be in place?
+What does the Consumer Duty require of regulated firms?
+How should firms demonstrate fair value to retail customers?
+What are the expectations on communications with retail customers?
+What governance and periodic review of privacy risks is expected?
+Which legislation applies to the processing of personal data in the UK?

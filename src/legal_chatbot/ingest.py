@@ -55,3 +55,11 @@ def create_chunks(source_dir: Path, chunk_size: int, chunk_overlap: int) -> List
                 )
             )
     return chunks
+
+
+def load_reference_queries(path: Path) -> List[str]:
+    """One query per line; blank lines and lines starting with # are ignored."""
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]

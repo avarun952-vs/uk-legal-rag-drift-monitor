@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List
 
 from .config import settings
-from .drift import kl_divergence, population_stability_index
+from .drift import score_window_drift
 from .generator import generate_answer
 from .retrieval import Retriever
 
@@ -13,28 +14,31 @@ from .retrieval import Retriever
 class ChatResult:
     answer: str
     passages: List[Dict]
-    drift_metrics: Dict[str, float]
+    drift_metrics: Dict
 
 
 class LegalChatbotPipeline:
-    def __init__(self) -> None:
+    def __init__(self, window_size: int = 200) -> None:
         self.retriever = Retriever(settings.embedding_model, settings.vector_dir)
         self.retriever.load()
+        # Rolling window of recent top-1 scores, compared against the baseline scores
+        # recorded for the reference query set when the index was first built.
+        self._recent_top1: deque[float] = deque(maxlen=window_size)
+
+    def _retrieval_drift(self) -> Dict:
+        baseline = self.retriever.baseline_stats.get("reference_top1_scores") or []
+        if not baseline:
+            return {"status": "no_baseline"}
+        return score_window_drift(baseline, list(self._recent_top1), min_samples=settings.min_drift_window)
 
     def ask(self, question: str) -> ChatResult:
         passages = self.retriever.search(question, top_k=settings.top_k)
-        scores = [p["score"] for p in passages]
+        top1 = max((p["score"] for p in passages), default=0.0)
+        if passages:
+            self._recent_top1.append(top1)
 
-        baseline_mean = self.retriever.baseline_stats.get("embedding_norm_mean", 1.0)
-        baseline_std = self.retriever.baseline_stats.get("embedding_norm_std", 0.01)
-
-        expected_distribution = [baseline_mean - baseline_std, baseline_mean, baseline_mean + baseline_std]
-        actual_distribution = scores if scores else [0.0, 0.0, 0.0]
-
-        drift_metrics = {
-            "psi": population_stability_index(expected_distribution, actual_distribution, bins=5),
-            "kl_divergence": kl_divergence(expected_distribution, actual_distribution, bins=5),
-        }
+        drift_metrics = self._retrieval_drift()
+        drift_metrics["top1_score"] = top1
 
         answer = generate_answer(
             provider=settings.llm_provider,

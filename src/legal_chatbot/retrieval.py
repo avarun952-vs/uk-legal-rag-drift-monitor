@@ -33,6 +33,7 @@ class Retriever:
         self.baseline_path = self.vector_dir / "baseline_stats.json"
         self.vectorizer_path = self.vector_dir / "vectorizer.pkl"
         self.mode_path = self.vector_dir / "mode.json"
+        self.baseline_vectors_path = self.vector_dir / "baseline_vectors.npy"
 
         self._metadata: List[Dict[str, Any]] = []
         self._vectors: np.ndarray | None = None
@@ -53,7 +54,12 @@ class Retriever:
             self._mode = "tfidf"
             return self._encoder
 
-    def build(self, chunks: List[Chunk]) -> None:
+    def build(
+        self,
+        chunks: List[Chunk],
+        reference_queries: List[str] | None = None,
+        reset_baseline: bool = False,
+    ) -> None:
         texts = [c.content for c in chunks]
         encoder = self._get_encoder()
 
@@ -70,17 +76,22 @@ class Retriever:
             pickle.dump([asdict(c) for c in chunks], f)
         save_json(self.mode_path, {"mode": self._mode})
 
-        norms = np.linalg.norm(vectors, axis=1).tolist()
-        baseline = {
-            "embedding_norm_mean": float(np.mean(norms)),
-            "embedding_norm_std": float(np.std(norms)),
-            "document_count": len(chunks),
-            "retrieval_mode": self._mode,
-        }
-        save_json(self.baseline_path, baseline)
-
         self._vectors = vectors
         self._metadata = [asdict(c) for c in chunks]
+
+        # The baseline is a frozen snapshot. It is written on the first build (or when
+        # explicitly reset) and left alone on later rebuilds, so drift is always
+        # measured against the same reference rather than against the last build.
+        if reset_baseline or not self.baseline_path.exists() or not self.baseline_vectors_path.exists():
+            np.save(self.baseline_vectors_path, vectors)
+            save_json(
+                self.baseline_path,
+                {
+                    "document_count": len(chunks),
+                    "retrieval_mode": self._mode,
+                    "reference_top1_scores": self.top1_scores(reference_queries or []),
+                },
+            )
 
     def load(self) -> None:
         if not self.matrix_path.exists() or not self.meta_path.exists():
@@ -148,3 +159,25 @@ class Retriever:
             item["score"] = float(scores[int(idx)])
             results.append(item)
         return results
+
+    def top1_scores(self, queries: List[str]) -> List[float]:
+        """Top-1 cosine score for each query (used to build and check the baseline)."""
+        return [self.search(q, top_k=1)[0]["score"] for q in queries]
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def chunk_count(self) -> int:
+        return len(self._metadata)
+
+    @property
+    def vectors(self) -> np.ndarray | None:
+        return self._vectors
+
+    @property
+    def baseline_vectors(self) -> np.ndarray | None:
+        if not self.baseline_vectors_path.exists():
+            return None
+        return np.load(self.baseline_vectors_path)
