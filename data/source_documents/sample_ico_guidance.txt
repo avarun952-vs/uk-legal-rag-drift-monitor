@@ -1,0 +1,4 @@
+Information Commissioner's Office sample guidance extract.
+Organisations processing personal data should demonstrate lawful basis, transparency, data minimisation, accuracy, storage limitation, and security.
+Where personal data is used in automated systems, organisations should provide clear explanations of purpose, legal basis, and the rights available to individuals.
+Governance controls should include record keeping, accountability, and periodic review of privacy risks.

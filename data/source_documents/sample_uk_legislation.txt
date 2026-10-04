@@ -1,0 +1,4 @@
+Sample UK legislation-style extract.
+Where an organisation relies on automated decision-support systems, it should implement review processes to reduce the risk of unfair, inaccurate, or outdated outputs.
+Operational controls should include source traceability, documentation of updates, and escalation to qualified professionals where material legal interpretation is required.
+Systems deployed in dynamic regulatory domains should be reviewed when the underlying legal corpus changes significantly.
