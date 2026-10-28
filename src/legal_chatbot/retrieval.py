@@ -11,18 +11,33 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from .ingest import Chunk
 from .utils import ensure_dir, load_json, save_json
 
+try:  # FAISS is the primary search backend; NumPy is kept as a fallback.
+    import faiss  # type: ignore
+
+    HAS_FAISS = True
+except ImportError:  # pragma: no cover - depends on the environment
+    faiss = None
+    HAS_FAISS = False
+
+
+def _l2_normalise(matrix: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(matrix, dtype="float32")
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return (matrix / norms).astype("float32")
+
 
 class Retriever:
-    """Dense retrieval with graceful fallback.
+    """Dense retrieval over a local corpus.
 
-    Preferred mode:
-        sentence-transformers embeddings + cosine similarity
+    Embeddings:
+        sentence-transformers (preferred) or TF-IDF when the model cannot be
+        downloaded, for example on a restricted machine.
 
-    Fallback mode:
-        TF-IDF vectorisation + cosine similarity
-
-    This design keeps the project runnable even when a transformer model
-    cannot be downloaded in restricted environments.
+    Search:
+        FAISS inner-product index over L2-normalised vectors, which is the same as
+        cosine similarity. If FAISS is not installed, the same ranking is done with
+        NumPy so the project still runs.
     """
 
     def __init__(self, model_name: str, vector_dir: Path) -> None:
@@ -34,12 +49,15 @@ class Retriever:
         self.vectorizer_path = self.vector_dir / "vectorizer.pkl"
         self.mode_path = self.vector_dir / "mode.json"
         self.baseline_vectors_path = self.vector_dir / "baseline_vectors.npy"
+        self.index_path = self.vector_dir / "index.faiss"
 
         self._metadata: List[Dict[str, Any]] = []
         self._vectors: np.ndarray | None = None
+        self._index = None
         self._encoder = None
         self._mode = "unknown"
 
+    # ------------------------------------------------------------------ encoding
     def _get_encoder(self):
         if self._encoder is not None:
             return self._encoder
@@ -54,6 +72,35 @@ class Retriever:
             self._mode = "tfidf"
             return self._encoder
 
+    def _encode_query(self, query: str) -> np.ndarray:
+        encoder = self._encoder
+        if encoder is None:
+            if self._mode == "sentence_transformer":
+                from sentence_transformers import SentenceTransformer
+                encoder = SentenceTransformer(self.model_name)
+                self._encoder = encoder
+            else:
+                with self.vectorizer_path.open("rb") as f:
+                    encoder = pickle.load(f)
+                self._encoder = encoder
+
+        if self._mode == "sentence_transformer":
+            vector = encoder.encode([query], normalize_embeddings=True, show_progress_bar=False)
+        else:
+            vector = encoder.transform([query]).toarray()
+        return _l2_normalise(vector)
+
+    # --------------------------------------------------------------------- index
+    def _build_index(self, vectors: np.ndarray) -> None:
+        """Store normalised vectors and, when available, a FAISS index over them."""
+        self._vectors = _l2_normalise(vectors)
+        if HAS_FAISS and self._vectors.size:
+            index = faiss.IndexFlatIP(self._vectors.shape[1])
+            index.add(self._vectors)
+            self._index = index
+        else:
+            self._index = None
+
     def build(
         self,
         chunks: List[Chunk],
@@ -65,25 +112,26 @@ class Retriever:
 
         if self._mode == "sentence_transformer":
             vectors = encoder.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-            vectors = np.asarray(vectors, dtype="float32")
         else:
-            vectors = encoder.fit_transform(texts).toarray().astype("float32")
+            vectors = encoder.fit_transform(texts).toarray()
             with self.vectorizer_path.open("wb") as f:
                 pickle.dump(encoder, f)
 
-        np.save(self.matrix_path, vectors)
-        with self.meta_path.open("wb") as f:
-            pickle.dump([asdict(c) for c in chunks], f)
-        save_json(self.mode_path, {"mode": self._mode})
-
-        self._vectors = vectors
+        self._build_index(np.asarray(vectors, dtype="float32"))
         self._metadata = [asdict(c) for c in chunks]
+
+        np.save(self.matrix_path, self._vectors)
+        with self.meta_path.open("wb") as f:
+            pickle.dump(self._metadata, f)
+        save_json(self.mode_path, {"mode": self._mode})
+        if self._index is not None:
+            faiss.write_index(self._index, str(self.index_path))
 
         # The baseline is a frozen snapshot. It is written on the first build (or when
         # explicitly reset) and left alone on later rebuilds, so drift is always
         # measured against the same reference rather than against the last build.
         if reset_baseline or not self.baseline_path.exists() or not self.baseline_vectors_path.exists():
-            np.save(self.baseline_vectors_path, vectors)
+            np.save(self.baseline_vectors_path, self._vectors)
             save_json(
                 self.baseline_path,
                 {
@@ -97,11 +145,18 @@ class Retriever:
         if not self.matrix_path.exists() or not self.meta_path.exists():
             raise FileNotFoundError("Vector index not found. Run scripts/build_index.py first.")
 
-        self._vectors = np.load(self.matrix_path)
+        vectors = np.load(self.matrix_path)
         with self.meta_path.open("rb") as f:
             self._metadata = pickle.load(f)
 
         self._mode = (load_json(self.mode_path, default={}) or {}).get("mode", "tfidf")
+
+        if HAS_FAISS and self.index_path.exists():
+            self._vectors = _l2_normalise(vectors)
+            self._index = faiss.read_index(str(self.index_path))
+        else:
+            # Older index folders have no index.faiss; build the index in memory.
+            self._build_index(vectors)
 
         if self._mode == "tfidf":
             if not self.vectorizer_path.exists():
@@ -111,52 +166,29 @@ class Retriever:
         else:
             self._encoder = None
 
-    @property
-    def baseline_stats(self) -> Dict[str, Any]:
-        return load_json(self.baseline_path, default={}) or {}
-
-    def _encode_query(self, query: str) -> np.ndarray:
-        encoder = self._encoder
-        if encoder is None:
-            if self._mode == "sentence_transformer":
-                from sentence_transformers import SentenceTransformer
-                encoder = SentenceTransformer(self.model_name)
-            else:
-                with self.vectorizer_path.open("rb") as f:
-                    encoder = pickle.load(f)
-        
-        if hasattr(encoder, 'encode') and 'SentenceTransformer' in str(type(encoder)):
-            vector = encoder.encode([query], normalize_embeddings=True, show_progress_bar=False)
-        else:
-            # TF-IDF fallback
-            vector = encoder.transform([query]).toarray().astype("float32")
-            # l2 normalize
-            denom = np.linalg.norm(vector, axis=1, keepdims=True)
-            denom[denom == 0] = 1.0
-            vector = vector / denom
-        
-        return np.asarray(vector, dtype="float32")
+    # -------------------------------------------------------------------- search
+    def _rank(self, query_vector: np.ndarray, top_k: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return (scores, indices) of the top_k chunks for a normalised query vector."""
+        top_k = max(1, min(top_k, len(self._metadata)))
+        query_vector = _l2_normalise(query_vector.reshape(1, -1))
+        if self._index is not None:
+            scores, indices = self._index.search(query_vector, top_k)
+            return scores[0], indices[0]
+        scores = (self._vectors @ query_vector.T).reshape(-1)
+        indices = np.argsort(scores)[::-1][:top_k]
+        return scores[indices], indices
 
     def search(self, query: str, top_k: int = 4) -> List[Dict[str, Any]]:
         if self._vectors is None:
             self.load()
 
-        query_vector = self._encode_query(query)
-        matrix = self._vectors
-        row_norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-        row_norms[row_norms == 0] = 1.0
-        matrix_norm = matrix / row_norms
-
-        scores = matrix_norm @ query_vector.T
-        scores = scores.reshape(-1)
-
-        top_k = max(1, min(top_k, len(scores)))
-        top_indices = np.argsort(scores)[::-1][:top_k]
-
+        scores, indices = self._rank(self._encode_query(query), top_k)
         results: List[Dict[str, Any]] = []
-        for idx in top_indices:
+        for score, idx in zip(scores, indices):
+            if idx < 0:  # FAISS pads with -1 when there are fewer vectors than top_k
+                continue
             item = dict(self._metadata[int(idx)])
-            item["score"] = float(scores[int(idx)])
+            item["score"] = float(score)
             results.append(item)
         return results
 
@@ -164,9 +196,18 @@ class Retriever:
         """Top-1 cosine score for each query (used to build and check the baseline)."""
         return [self.search(q, top_k=1)[0]["score"] for q in queries]
 
+    # ---------------------------------------------------------------- properties
+    @property
+    def baseline_stats(self) -> Dict[str, Any]:
+        return load_json(self.baseline_path, default={}) or {}
+
     @property
     def mode(self) -> str:
         return self._mode
+
+    @property
+    def search_backend(self) -> str:
+        return "faiss" if self._index is not None else "numpy"
 
     @property
     def chunk_count(self) -> int:

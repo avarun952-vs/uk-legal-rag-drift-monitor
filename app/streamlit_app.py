@@ -13,21 +13,11 @@ if str(SRC_DIR) not in sys.path:
 from legal_chatbot.pipeline import LegalChatbotPipeline  # noqa: E402
 from legal_chatbot.config import settings  # noqa: E402
 
-ICON = "\u2696\ufe0f"
+ICON = "⚖️"
 st.set_page_config(page_title="Drift-Aware Legal AI Chatbot", page_icon=ICON, layout="wide")
 
 st.title(f"{ICON} Drift-Aware Legal AI Chatbot")
 st.caption("UK legal and regulatory assistant with retrieval grounding and drift monitoring.")
-
-with st.sidebar:
-    st.subheader("Configuration")
-    st.write(f"**Provider:** {settings.llm_provider}")
-    st.write(f"**Embedding model:** {settings.embedding_model}")
-    st.write(f"**Top-k retrieval:** {settings.top_k}")
-    st.info(
-        "This system is a portfolio demonstration and decision-support prototype. "
-        "It does not constitute legal advice."
-    )
 
 
 @st.cache_resource
@@ -36,6 +26,18 @@ def get_pipeline() -> LegalChatbotPipeline:
 
 
 pipeline = get_pipeline()
+
+with st.sidebar:
+    st.subheader("Configuration")
+    st.write(f"**Provider:** {settings.llm_provider}")
+    st.write(f"**Embedding model:** {settings.embedding_model}")
+    st.write(f"**Vector search:** {pipeline.retriever.search_backend}")
+    st.write(f"**Top-k retrieval:** {settings.top_k}")
+    st.write(f"**Confidence threshold:** {pipeline.min_confidence:.2f}")
+    st.info(
+        "This system is a portfolio demonstration and decision-support prototype. "
+        "It does not constitute legal advice."
+    )
 
 default_question = "What are the key compliance considerations around data protection and consumer duty?"
 question = st.text_area("Enter your legal or regulatory query", value=default_question, height=120)
@@ -48,12 +50,21 @@ if st.button("Generate response", type="primary"):
 
     with col1:
         st.subheader("Answer")
+        if result.low_confidence:
+            st.warning(
+                "Low retrieval confidence. No answer was generated; the closest source "
+                "extracts are shown instead so you can check them yourself."
+            )
         st.write(result.answer)
 
     with col2:
         st.subheader("Drift monitoring")
         dm = result.drift_metrics
-        st.metric("Top-1 similarity", f"{dm['top1_score']:.3f}")
+        st.metric(
+            "Top-1 similarity",
+            f"{dm['top1_score']:.3f}",
+            help=f"Answers are only generated at or above {dm['min_confidence']:.2f}.",
+        )
         status = dm["status"]
         if status == "no_baseline":
             st.info("No baseline yet. Run scripts/build_index.py to create one.")

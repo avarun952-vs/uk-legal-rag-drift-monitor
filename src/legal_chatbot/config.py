@@ -25,6 +25,11 @@ class Settings:
     vector_dir: Path = Path(os.getenv("VECTOR_DIR", "data/vector_store"))
     reference_queries: Path = Path(os.getenv("REFERENCE_QUERIES", "data/reference_queries.txt"))
     min_drift_window: int = int(os.getenv("MIN_DRIFT_WINDOW", "20"))
+    # Below this top-1 cosine score the pipeline does not ask the LLM for an answer and
+    # returns the closest sourced extracts with a warning instead. 0.35 was chosen from
+    # the reference queries (in-domain top-1 scores sit roughly between 0.36 and 0.72
+    # with sentence-transformer embeddings). Re-check it if the corpus or model changes.
+    min_confidence: float = float(os.getenv("MIN_CONFIDENCE", "0.35"))
 
 
 settings = Settings()

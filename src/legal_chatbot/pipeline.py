@@ -6,7 +6,7 @@ from typing import Dict, List
 
 from .config import settings
 from .drift import score_window_drift
-from .generator import generate_answer
+from .generator import generate_answer, low_confidence_answer
 from .retrieval import Retriever
 
 
@@ -15,12 +15,20 @@ class ChatResult:
     answer: str
     passages: List[Dict]
     drift_metrics: Dict
+    low_confidence: bool = False
 
 
 class LegalChatbotPipeline:
-    def __init__(self, window_size: int = 200) -> None:
+    def __init__(
+        self,
+        window_size: int = 200,
+        min_confidence: float | None = None,
+        provider: str | None = None,
+    ) -> None:
         self.retriever = Retriever(settings.embedding_model, settings.vector_dir)
         self.retriever.load()
+        self.min_confidence = settings.min_confidence if min_confidence is None else min_confidence
+        self.provider = settings.llm_provider if provider is None else provider
         # Rolling window of recent top-1 scores, compared against the baseline scores
         # recorded for the reference query set when the index was first built.
         self._recent_top1: deque[float] = deque(maxlen=window_size)
@@ -39,9 +47,21 @@ class LegalChatbotPipeline:
 
         drift_metrics = self._retrieval_drift()
         drift_metrics["top1_score"] = top1
+        drift_metrics["min_confidence"] = self.min_confidence
+
+        # Confidence gate: if even the best passage is a weak match, do not ask the
+        # language model to write an answer. Show the closest sourced extracts and say
+        # clearly that the match is weak, so the user checks the sources themselves.
+        if not passages or top1 < self.min_confidence:
+            return ChatResult(
+                answer=low_confidence_answer(question, passages, top1, self.min_confidence),
+                passages=passages,
+                drift_metrics=drift_metrics,
+                low_confidence=True,
+            )
 
         answer = generate_answer(
-            provider=settings.llm_provider,
+            provider=self.provider,
             question=question,
             passages=passages,
             openai_api_key=settings.openai_api_key,

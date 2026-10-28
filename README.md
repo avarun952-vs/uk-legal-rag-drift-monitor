@@ -1,200 +1,120 @@
-# Adaptive Drift-Aware Legal AI Chatbot for UK Law Updates
+# Drift-Aware Legal RAG Chatbot for UK Law
 
-A dissertation-ready, professionally structured project for building a **drift-aware Retrieval-Augmented Generation (RAG) legal chatbot** focused on **UK legal and regulatory updates**. The project includes a working Streamlit UI, modular Python backend, ingestion and indexing scripts, drift-monitoring logic, evaluation scaffolding, and an academic report pack.
+My MSc Artificial Intelligence dissertation project (University of East London, 2026).
 
-## 1. Project Overview
+It is a retrieval-augmented generation (RAG) chatbot that answers questions over UK legal and regulatory text. The part I cared about most was not getting it to answer. It was getting it to be honest about when it should not be trusted. In law, a confident wrong answer is worse than no answer, so the system:
 
-This system is designed to answer questions over a curated UK legal corpus while reducing hallucination through retrieval grounding and monitoring potential regulatory drift over time.
+1. **Shows its sources.** Every answer comes with the retrieved passages and their similarity scores.
+2. **Refuses to guess when retrieval is weak.** If the best match is below a confidence threshold, the language model is not called at all. The user gets the closest source extracts and a clear warning instead.
+3. **Watches for drift.** Legal guidance changes. The system keeps a frozen baseline and measures whether the indexed documents, or the quality of retrieval for real queries, have moved away from it, using Population Stability Index (PSI) and KL divergence.
 
-### Core features
-- Streamlit-based chat UI
-- Retrieval-Augmented Generation pipeline
-- Local corpus ingestion and indexing
-- Semantic vector search with sentence-transformer embeddings and offline TF-IDF fallback
-- Optional LLM backends:
-  - OpenAI-compatible API
-  - Ollama local models
-  - Fallback extractive mode when no generator is configured
-- Drift monitoring using:
-  - Population Stability Index (PSI)
-  - Kullback-Leibler (KL) divergence
-- Citation-aware answer formatting
-- Dissertation-friendly documentation and architecture
+This is a prototype for decision support, not legal advice.
 
-## 2. Folder Structure
+![Architecture](assets/architecture.png)
+
+## How it works
 
 ```text
-legal_ai_chatbot_project/
-├── app/
-│   └── streamlit_app.py
-├── assets/
-│   └── architecture.png
-├── data/
-│   ├── source_documents/
-│   │   ├── sample_fca_guidance.txt
-│   │   ├── sample_ico_guidance.txt
-│   │   └── sample_uk_legislation.txt
-│   └── vector_store/
-├── docs/
-│   ├── final_report.docx
-│   ├── final_report.md
-│   └── architecture_mermaid.md
-├── scripts/
-│   ├── build_index.py
-│   └── run_app.py
-├── src/
-│   └── legal_chatbot/
-│       ├── __init__.py
-│       ├── config.py
-│       ├── drift.py
-│       ├── generator.py
-│       ├── ingest.py
-│       ├── pipeline.py
-│       ├── prompts.py
-│       ├── retrieval.py
-│       └── utils.py
-├── tests/
-│   └── test_drift.py
-├── .env.example
-├── requirements.txt
-└── README.md
+documents -> chunking -> embeddings -> FAISS index
+                                          |
+question -> embed -> top-k search -> confidence gate --(weak)--> source extracts + warning
+                                          |
+                                       (strong)
+                                          v
+                              LLM answer with [1] [2] citations
+                                          |
+              top-1 score logged -> rolling window -> PSI / KL vs baseline
 ```
 
-## 3. Installation
+| Step | Implementation |
+| --- | --- |
+| Chunking | Fixed-size character chunks with overlap (`CHUNK_SIZE`, `CHUNK_OVERLAP`) |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2`, with a TF-IDF fallback for machines that cannot download the model |
+| Vector search | FAISS `IndexFlatIP` over L2-normalised vectors (inner product = cosine similarity). Falls back to NumPy if FAISS is not installed; a test checks both give the same ranking |
+| Generation | OpenAI-compatible API, a local Ollama model, or an extractive mode that needs no LLM |
+| Confidence gate | `MIN_CONFIDENCE` (default 0.35) on the top-1 cosine score |
+| Drift | PSI and KL divergence against a baseline snapshot, with a minimum sample size before anything is reported |
+| UI | Streamlit |
 
-### Step 1: Create a virtual environment
+## Drift monitoring
+
+Two different things can drift, so they are measured separately.
+
+**Corpus drift** happens when the documents change, for example new guidance is published or legislation is amended. When the index is first built, a copy of the embeddings is saved as the baseline. Later builds keep that baseline (unless you pass `--reset-baseline`), so `scripts/check_drift.py` always compares against the same reference. Each chunk is reduced to its similarity to the baseline centroid, and PSI and KL are computed between the two distributions. The centroid shift is reported alongside as a number that is easy to interpret.
+
+**Retrieval drift** happens when questions stop matching the documents well. A fixed set of reference queries (`data/reference_queries.txt`) is scored when the baseline is created. In the app, the top-1 score of each live query goes into a rolling window that is compared against those baseline scores.
+
+PSI on three or four values is noise, not a signal. The app reports "insufficient data" until at least `MIN_DRIFT_WINDOW` queries (default 20) have been seen, and results on small samples are labelled as indicative.
+
+PSI bands follow the usual convention: below 0.10 stable, 0.10 to 0.25 moderate, above 0.25 significant.
+
+## Confidence gate
+
+The threshold of 0.35 came from the reference queries. With sentence-transformer embeddings their top-1 scores sit roughly between 0.36 and 0.72, while off-topic questions score close to zero (for example, "Can my landlord keep my deposit?" scores about 0.06 because tenancy law is not in the corpus). So 0.35 lets in-domain questions through and stops the rest, although the lowest in-domain queries only just clear it. It is a starting point, not a tuned value: it depends on the embedding model and the corpus, and TF-IDF scores are on a different scale. Change it with `MIN_CONFIDENCE` in `.env`.
+
+## Running it
+
 ```bash
 python -m venv .venv
-```
-
-### Step 2: Activate it
-
-**Windows**
-```bash
-.venv\Scripts\activate
-```
-
-**macOS / Linux**
-```bash
-source .venv/bin/activate
-```
-
-### Step 3: Install dependencies
-```bash
+.venv\Scripts\activate          # Windows
+source .venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
-```
+cp .env.example .env            # then edit as needed
 
-### Step 4: Configure environment variables
-Copy `.env.example` to `.env` and add your settings.
-
-```bash
-cp .env.example .env
-```
-
-## 4. Quick Start
-
-### Build the vector index
-```bash
-python scripts/build_index.py
-```
-
-### Run the app
-```bash
-python scripts/run_app.py
-```
-
-Or directly:
-```bash
+python scripts/build_index.py   # build the index and, on first run, the baseline
 streamlit run app/streamlit_app.py
+python scripts/check_drift.py   # exit code 0 stable/moderate, 1 significant, 2 no baseline
 ```
 
-## 5. Supported LLM Modes
+`LLM_PROVIDER` in `.env` chooses the generator: `extractive` (default, no API needed), `openai` (set `OPENAI_API_KEY`) or `ollama` (needs Ollama running locally).
 
-Set `LLM_PROVIDER` in your `.env` file.
+## Tests
 
-### Option A: OpenAI-compatible API
-```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=your_api_key_here
-OPENAI_MODEL=gpt-4.1-mini
+```bash
+pytest -q
 ```
 
-### Option B: Ollama
-```env
-LLM_PROVIDER=ollama
-OLLAMA_MODEL=llama3.1
-OLLAMA_BASE_URL=http://localhost:11434
+- `tests/test_drift.py`: PSI and KL behave correctly (zero for identical data, large for shifted data, values outside the baseline range are counted), corpus drift separates a resampled corpus from a real topic change, and the minimum-sample guard works.
+- `tests/test_retrieval.py`: FAISS and NumPy return the same ranking and scores, scores are true cosine similarities, and the index saves, loads and rebuilds correctly.
+- `tests/test_confidence_fallback.py`: a weak match never reaches the LLM and returns sourced extracts, a strong match does, and the threshold boundary behaves as expected.
+
+The retrieval and pipeline tests use TF-IDF or stubs, so they run offline.
+
+## Limitations
+
+I want to be clear about what this does not show yet.
+
+- **The corpus is a small sample, not real legal text.** `data/source_documents/` holds three short texts (about 500 characters each) written in the style of ICO guidance, FCA Consumer Duty guidance and UK legislation. They are enough to demonstrate the pipeline, the confidence gate and the drift checks, not to answer real legal questions.
+- **Evaluation was qualitative.** I tested the system on a set of sample legal queries and checked the answers and sources by hand. There is no labelled test set yet, so there are no recall or precision figures.
+- **Thresholds are not tuned.** The confidence threshold and PSI bands are reasonable defaults, not values fitted on data.
+
+## Next steps
+
+- Load real legislation from legislation.gov.uk (Open Government Licence) and recent ICO and FCA publications.
+- Build a small labelled question set and measure recall@k and answer faithfulness.
+- Tune `MIN_CONFIDENCE` on that set, and compare the gate against simply letting the LLM answer.
+- Simulate a corpus update (old vs amended guidance) and show the drift check catching it.
+
+## Project structure
+
+```text
+app/streamlit_app.py          Streamlit UI
+scripts/build_index.py        Build the index and baseline
+scripts/check_drift.py        Compare the current index with the baseline
+scripts/run_app.py            Launch the app
+src/legal_chatbot/
+    config.py                 Settings from .env
+    ingest.py                 Load and chunk documents
+    retrieval.py              Embeddings and FAISS search
+    generator.py              LLM providers, extractive and low-confidence answers
+    pipeline.py               Retrieval, confidence gate and drift tracking
+    drift.py                  PSI, KL divergence, corpus and retrieval drift
+    prompts.py                System prompt
+data/source_documents/        Sample corpus
+data/reference_queries.txt    Fixed queries for the retrieval baseline
+tests/                        pytest suite
 ```
 
-### Option C: Extractive fallback
-```env
-LLM_PROVIDER=extractive
-```
+## Author
 
-This fallback mode does not require an external model API. It produces grounded summary-style answers from retrieved passages, which is useful for local testing and dissertation demonstration.
-
-## 6. How the System Works
-
-1. Legal documents are loaded from `data/source_documents/`
-2. Documents are split into semantically manageable chunks
-3. Chunks are embedded using `sentence-transformers` when available, with a TF-IDF fallback for restricted environments
-4. Vectors are stored locally for similarity search
-5. At query time:
-   - the query is embedded
-   - top-k passages are retrieved
-   - reranking is applied with cosine similarity
-   - drift metrics are computed against baseline retrieval behaviour
-   - an answer is produced with citations
-6. The UI displays:
-   - response
-   - supporting sources
-   - retrieval metadata
-   - drift warnings
-
-## 7. Dissertation Alignment
-
-This project directly supports a dissertation on:
-- Retrieval-Augmented Generation for legal QA
-- Hallucination reduction
-- Concept drift in dynamic regulatory corpora
-- Monitoring and evaluation of trustworthy legal AI
-
-The included report in `docs/` is written in professional UK English and can be adapted into your final university submission.
-
-## 8. Evaluation Suggestions
-
-Recommended experiments:
-- Vanilla baseline vs RAG vs Drift-aware RAG
-- Top-k sensitivity testing
-- Citation precision scoring
-- Hallucination rate assessment
-- Latency benchmarking
-- PSI and KL divergence monitoring before and after corpus updates
-
-## 9. Important Note
-
-This system is a **decision-support tool**, not a substitute for qualified legal advice. Outputs should always be checked against official UK legal and regulatory sources.
-
-## 10. Troubleshooting
-
-### Streamlit import errors
-Ensure you installed the full requirements list and activated the correct virtual environment.
-
-### OpenAI or Ollama not configured
-Use:
-```env
-LLM_PROVIDER=extractive
-```
-to run the system without a remote generation backend.
-
-## 11. Suggested Dissertation Usage
-
-You can use this package as:
-- a final project prototype
-- an implementation appendix
-- a demonstrator for viva or presentation
-- a base for experimental evaluation chapters
-
-## 12. Licence
-
-For academic and portfolio use.
+Varun Srinath Amarnath, MSc Artificial Intelligence, University of East London.

@@ -16,21 +16,48 @@ def _format_context(passages: List[Dict]) -> str:
     return "\n".join(formatted)
 
 
+def _source_bullets(passages: List[Dict]) -> str:
+    bullets = []
+    for idx, item in enumerate(passages, start=1):
+        snippet = item["content"].strip().replace("\n", " ")
+        snippet = snippet[:300].rsplit(" ", 1)[0] + "..." if len(snippet) > 300 else snippet
+        bullets.append(f"- Source [{idx}] ({item['source']}): {snippet}")
+    return "\n".join(bullets)
+
+
 def _extractive_answer(question: str, passages: List[Dict]) -> str:
     intro = (
         "Grounded summary generated in extractive mode. "
         "Please verify against the cited source materials.\n\n"
     )
-    bullets = []
-    for idx, item in enumerate(passages, start=1):
-        snippet = item["content"].strip().replace("\n", " ")
-        snippet = snippet[:300].rsplit(" ", 1)[0] + "..." if len(snippet) > 300 else snippet
-        bullets.append(f"- Source [{idx}] suggests: {snippet}")
     conclusion = (
         f"\n\nQuestion addressed: {question}\n"
         "This answer is based only on retrieved passages and is not legal advice."
     )
-    return intro + "\n".join(bullets) + conclusion
+    return intro + _source_bullets(passages) + conclusion
+
+
+def low_confidence_answer(question: str, passages: List[Dict], top1: float, threshold: float) -> str:
+    """Response used when retrieval is too weak to trust a generated answer.
+
+    The language model is not called. The user gets the closest sourced extracts and a
+    clear statement that the match is weak, so they can judge the sources themselves.
+    """
+    if not passages:
+        return (
+            "No relevant passages were found for this question, so no answer was generated. "
+            "Try rephrasing it, or check that the topic is covered by the indexed documents."
+        )
+    header = (
+        f"Low retrieval confidence: the best matching passage scored {top1:.2f}, below the "
+        f"{threshold:.2f} threshold. Rather than generate an answer the sources may not support, "
+        "here are the closest extracts. Please check them before relying on anything.\n\n"
+    )
+    footer = (
+        f"\n\nQuestion asked: {question}\n"
+        "The indexed documents may not cover this topic. This is not legal advice."
+    )
+    return header + _source_bullets(passages) + footer
 
 
 def generate_answer(
